@@ -12,13 +12,13 @@ import (
 )
 
 const (
-	version = "0.1.0"
+	version = "0.2.0"
 	urlBase = "check.getipintel.net/check.php"
 )
 
 var (
 	// throttle queries to ~15 req/min with a burst capacity of 15 (imposed by API)
-	rateLimiter = ratelimit.NewBucketWithQuantum(1*time.Minute, 15, 15)
+	rateLimiter = ratelimit.NewBucketWithQuantum(4*time.Second, 15, 1)
 
 	httpClient = http.Client{Timeout: 10 * time.Second}
 	userAgent  = "go-ipintel/" + version + " (github.com/janeczku/go-ipintel)"
@@ -38,35 +38,44 @@ const (
 
 // Client is a struct used to make API queries.
 type Client struct {
+	// Your email address
+	Email string
 	// Scheme used for the API requests ("http" or "https")
 	Scheme string
 	// Type of proxy check to use (Static/Dynamic)
 	Check CheckType
-	// Your email address
-	Email string
+	// Maximum time to wait when a query is being throttled.
+	// If set to zero calls to GetProxyScore() will block until
+	// there is enough capacity in the rate limiter bucket.
+	MaxWait time.Duration
 }
 
 // NewClient creates a new Client using the given parameters.
-func NewClient(check CheckType, email string, useSSL bool) *Client {
+// Example:
+//   c := ipintel.NewClient("your@email.com", false, ipintel.Static, 5*time.Second)
+func NewClient(email string, ssl bool, check CheckType, mWait time.Duration) *Client {
 	scheme := "http"
-	if useSSL {
+	if ssl {
 		scheme = "https"
 	}
 	return &Client{
-		Scheme: scheme,
-		Check:  check,
-		Email:  email,
+		Email:   email,
+		Scheme:  scheme,
+		Check:   check,
+		MaxWait: mWait,
 	}
 }
 
-// GetProxyScore queries the API and returns the proxy score for
-// the given IP address.
+// GetProxyScore queries the API and returns the proxy score for the given IP address.
 func (c *Client) GetProxyScore(ip string) (score float32, err error) {
-	rateLimiter.Wait(1)
+	if ok := rateLimiter.WaitMaxDuration(1, c.MaxWait); !ok {
+		err = fmt.Errorf("Throttled: Can't make query within the next %s", c.MaxWait)
+		return
+	}
 
 	req, err := http.NewRequest("GET", c.getURL(ip), nil)
 	if err != nil {
-		err = fmt.Errorf("Failed making request: %v", err)
+		err = fmt.Errorf("Failed preparing request: %v", err)
 		return
 	}
 	req.Header.Set("User-Agent", userAgent)
